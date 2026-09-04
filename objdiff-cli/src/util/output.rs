@@ -85,3 +85,33 @@ where
     }
     Ok(())
 }
+
+pub fn write_json_output<T, P>(input: &T, output: Option<P>, pretty: bool) -> Result<()>
+where
+    T: serde::Serialize,
+    P: AsRef<Path>,
+{
+    match output.as_ref().map(|p| p.as_ref()) {
+        Some(output) if output != Path::new("-") => {
+            info!("Writing to {}", output.display());
+            let file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output)
+                .with_context(|| format!("Failed to create file {}", output.display()))?;
+            let mut output = BufWriter::new(file);
+            if pretty {
+                serde_json::to_writer_pretty(&mut output, input)
+                    .context("Failed to write output file")?;
+            } else {
+                serde_json::to_writer(&mut output, input).context("Failed to write output file")?;
+            }
+            output.flush().context("Failed to flush output file")?;
+        }
+        _ if pretty => serde_json::to_writer_pretty(std::io::stdout(), input)?,
+        _ => serde_json::to_writer(std::io::stdout(), input)?,
+    }
+    Ok(())
+}

@@ -162,6 +162,16 @@ If specified, objdiff displays a list of objects in the sidebar for easy navigat
 - **`base_path`** _(optional)_ - Path to the "base" or "current" object (built from **current source code**). Omit if there is no source object yet.
 - **`metadata.auto_generated`** _(optional)_ - Hides the object from the sidebar but includes it in progress reports.
 - **`metadata.complete`** _(optional)_ - Marks the object as "complete" (linked) when `true` or "incomplete" when `false`.
+- **`symbol_mappings`** _(optional)_ - A map of target symbol names to their corresponding base symbol names.
+
+The CLI can list mapping candidates for a symbol in a unit and save a selected pair:
+
+```shell
+objdiff-cli map --project . --unit path/to/unit.o --target target_symbol --format json-pretty
+objdiff-cli pair --project . --unit path/to/unit.o --target target_symbol --base base_symbol
+```
+
+Use `--base` instead of `--target` with `map` to search in the other direction, and `--show-mapped` to include symbols already paired by the normal diff. The `pair` command updates the unit's `symbol_mappings` in `objdiff.json`.
 
 ## Building
 

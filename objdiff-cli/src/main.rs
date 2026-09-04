@@ -86,6 +86,8 @@ struct TopLevel {
 #[argp(subcommand)]
 enum SubCommand {
     Diff(cmd::diff::Args),
+    Map(cmd::mapping::MapArgs),
+    Pair(cmd::mapping::PairArgs),
     Report(cmd::report::Args),
 }
 
@@ -141,6 +143,8 @@ fn main() {
     }
     result = result.and_then(|_| match args.command {
         SubCommand::Diff(c_args) => cmd::diff::run(c_args),
+        SubCommand::Map(c_args) => cmd::mapping::map(c_args),
+        SubCommand::Pair(c_args) => cmd::mapping::pair(c_args),
         SubCommand::Report(c_args) => cmd::report::run(c_args),
     });
     if let Err(e) = result {
