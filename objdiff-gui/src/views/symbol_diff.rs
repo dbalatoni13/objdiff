@@ -9,8 +9,8 @@ use objdiff_core::{
     diff::{
         DiffObjConfig, ObjectDiff, ShowSymbolSizes, SymbolDiff,
         display::{
-            HighlightKind, SectionDisplay, SymbolFilter, SymbolNavigationKind, display_sections,
-            symbol_context, symbol_hover,
+            HighlightKind, SectionDisplay, SectionDisplaySymbol, SymbolFilter,
+            SymbolNavigationKind, display_sections, symbol_context, symbol_hover,
         },
     },
     jobs::{
@@ -85,6 +85,8 @@ pub enum DiffViewAction {
     SetRelocMappings(Vec<(String, String)>),
     /// Set the show_mapped_symbols flag
     SetShowMappedSymbols(bool),
+    /// Set whether mapping results are sorted by match percentage.
+    SetSortMappingByMatchPercent(bool),
     /// Set the show_data_flow flag
     SetShowDataFlow(bool),
     // Scrolls a row of the function view table into view.
@@ -187,6 +189,7 @@ pub struct SymbolViewState {
     pub disable_reverse_fn_order: bool,
     pub show_hidden_symbols: bool,
     pub show_mapped_symbols: bool,
+    pub sort_mapping_by_match_percent: bool,
 }
 
 impl DiffViewState {
@@ -425,6 +428,9 @@ impl DiffViewState {
             }
             DiffViewAction::SetShowMappedSymbols(value) => {
                 self.symbol_state.show_mapped_symbols = value;
+            }
+            DiffViewAction::SetSortMappingByMatchPercent(value) => {
+                self.symbol_state.sort_mapping_by_match_percent = value;
             }
             DiffViewAction::SetShowDataFlow(value) => {
                 let Ok(mut state) = state.write() else {
@@ -846,6 +852,22 @@ fn find_last_symbol(section_display: &[SectionDisplay]) -> Option<usize> {
     section_display.iter().flat_map(|s| s.symbols.iter()).next_back().map(|s| s.symbol)
 }
 
+fn mapping_symbol_match_percent(
+    ctx: SymbolDiffContext<'_>,
+    symbol_display: &SectionDisplaySymbol,
+) -> f32 {
+    let symbol_diff = if symbol_display.is_mapping_symbol {
+        ctx.diff
+            .mapping_symbols
+            .iter()
+            .find(|diff| diff.symbol_index == symbol_display.symbol)
+            .map(|diff| &diff.symbol_diff)
+    } else {
+        Some(&ctx.diff.symbols[symbol_display.symbol])
+    };
+    symbol_diff.and_then(|diff| diff.match_percent).unwrap_or(0.0)
+}
+
 #[must_use]
 pub fn symbol_list_ui(
     ui: &mut Ui,
@@ -859,13 +881,22 @@ pub fn symbol_list_ui(
 ) -> Option<DiffViewAction> {
     let mut ret = None;
     ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+        let is_mapping_view = matches!(filter, SymbolFilter::Mapping(_, _));
         let mut show_mapped_symbols = state.show_mapped_symbols;
-        if let SymbolFilter::Mapping(_, _) = filter
-            && ui.checkbox(&mut show_mapped_symbols, "Show mapped symbols").changed()
-        {
-            ret = Some(DiffViewAction::SetShowMappedSymbols(show_mapped_symbols));
+        let mut sort_mapping_by_match_percent =
+            is_mapping_view && state.sort_mapping_by_match_percent;
+        if is_mapping_view {
+            if ui.checkbox(&mut show_mapped_symbols, "Show mapped symbols").changed() {
+                ret = Some(DiffViewAction::SetShowMappedSymbols(show_mapped_symbols));
+            }
+            if ui.checkbox(&mut sort_mapping_by_match_percent, "Sort by match percentage").changed()
+            {
+                ret = Some(DiffViewAction::SetSortMappingByMatchPercent(
+                    sort_mapping_by_match_percent,
+                ));
+            }
         }
-        let section_display = display_sections(
+        let mut section_display = display_sections(
             ctx.obj,
             ctx.diff,
             filter,
@@ -873,6 +904,15 @@ pub fn symbol_list_ui(
             show_mapped_symbols,
             state.reverse_fn_order,
         );
+        if sort_mapping_by_match_percent {
+            for section in &mut section_display {
+                section.symbols.sort_by(|a, b| {
+                    mapping_symbol_match_percent(ctx, b)
+                        .partial_cmp(&mapping_symbol_match_percent(ctx, a))
+                        .unwrap_or(Ordering::Equal)
+                });
+            }
+        }
 
         hotkeys::check_scroll_hotkeys(ui, false);
 
