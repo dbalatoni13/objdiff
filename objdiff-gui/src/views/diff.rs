@@ -8,14 +8,14 @@ use objdiff_core::{
     build::BuildStatus,
     diff::{
         DataDiffKind, DiffObjConfig, FunctionRelocDiffs, InstructionDiffKind, InstructionDiffRow,
-        ObjectDiff, SymbolDiff,
+        ObjectDiff, SymbolDiff, find_similar_code_symbols,
         data::BYTES_PER_ROW,
         display::{
             ContextItem, DiffText, HoverItem, HoverItemColor, SymbolFilter, SymbolNavigationKind,
             display_row,
         },
     },
-    obj::{InstructionArgValue, Object, Symbol, SymbolKind},
+    obj::{InstructionArgValue, Object, SectionKind, Symbol, SymbolFlag, SymbolKind},
     util::ReallySigned,
 };
 use time::format_description;
@@ -180,6 +180,94 @@ fn get_reloc_mappings(
         .collect();
 
     unambiguous
+}
+
+/// Obtains relocation mappings from all matched functions whose match percentage is at least 80%.
+fn get_high_match_reloc_mappings(
+    left_obj: &Object,
+    left_diff: &ObjectDiff,
+    right_obj: &Object,
+    right_diff: &ObjectDiff,
+) -> Vec<(String, String)> {
+    left_diff
+        .symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(left_symbol_idx, left_symbol_diff)| {
+            let right_symbol_idx = left_symbol_diff.target_symbol?;
+            let match_percent = left_symbol_diff.match_percent?;
+            if match_percent < 80.0 {
+                return None;
+            }
+
+            let left_symbol = left_obj.symbols.get(left_symbol_idx)?;
+            let right_symbol = right_obj.symbols.get(right_symbol_idx)?;
+            let left_section = left_symbol.section.and_then(|idx| left_obj.sections.get(idx))?;
+            let right_section = right_symbol.section.and_then(|idx| right_obj.sections.get(idx))?;
+            if left_section.kind != SectionKind::Code || right_section.kind != SectionKind::Code {
+                return None;
+            }
+
+            Some(get_reloc_mappings(
+                left_obj,
+                right_obj,
+                left_symbol_diff,
+                left_symbol_idx,
+                right_diff.symbols.get(right_symbol_idx)?,
+                right_symbol_idx,
+            ))
+        })
+        .flatten()
+        .collect()
+}
+
+/// Finds unambiguous candidates for large right-side functions.
+fn get_large_function_mappings(
+    left_obj: &Object,
+    left_diff: &ObjectDiff,
+    right_obj: &Object,
+    right_diff: &ObjectDiff,
+    diff_config: &DiffObjConfig,
+) -> Vec<(String, String)> {
+    right_obj
+        .symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(right_symbol_idx, right_symbol)| {
+            if right_symbol.size <= 0xff || right_symbol.flags.contains(SymbolFlag::Ignored) {
+                return None;
+            }
+            if right_diff.symbols.get(right_symbol_idx)?.target_symbol.is_some() {
+                return None;
+            }
+            let right_section = right_symbol.section.and_then(|idx| right_obj.sections.get(idx))?;
+            if right_section.kind != SectionKind::Code {
+                return None;
+            }
+
+            let mut candidates = find_similar_code_symbols(
+                right_obj,
+                right_symbol_idx,
+                left_obj,
+                diff_config,
+            );
+            candidates.retain(|candidate| {
+                left_diff
+                    .symbols
+                    .get(candidate.symbol_idx)
+                    .is_some_and(|symbol_diff| symbol_diff.target_symbol.is_none())
+            });
+            let best = candidates.first()?;
+            if best.match_percent < 80.0
+                || candidates.get(1).is_some_and(|candidate| candidate.match_percent >= 40.0)
+            {
+                return None;
+            }
+
+            let left_symbol = left_obj.symbols.get(best.symbol_idx)?;
+            Some((left_symbol.name.clone(), right_symbol.name.clone()))
+        })
+        .collect()
 }
 
 #[must_use]
@@ -501,6 +589,30 @@ pub fn diff_view_ui(
                         }
                     }
 
+                    if state.current_view == View::SymbolDiff
+                        && let Some((left_obj, left_diff)) = left_ctx.obj
+                        && let Some((right_obj, right_diff)) = right_ctx.obj
+                        && right_ctx.status.success
+                        && ui
+                            .add_enabled(
+                                diff_config.function_reloc_diffs != FunctionRelocDiffs::None
+                                    && diff_config.function_reloc_diffs
+                                        != FunctionRelocDiffs::DataValue,
+                                egui::Button::new("Pair up 80%+ relocs"),
+                            )
+                            .on_hover_text_at_pointer(
+                                "Automatically pair up symbol names in functions matching at least 80%",
+                            )
+                            .on_disabled_hover_text("Name relocation diffs have to be enabled")
+                            .clicked()
+                    {
+                        ret = Some(DiffViewAction::SetRelocMappings(
+                            get_high_match_reloc_mappings(
+                                left_obj, left_diff, right_obj, right_diff,
+                            ),
+                        ));
+                    }
+
                     ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
                         if ui.small_button("⏷").on_hover_text_at_pointer("Expand all").clicked() {
                             open_sections.0 = Some(true);
@@ -691,6 +803,28 @@ pub fn diff_view_ui(
                     }
                     if response.changed() {
                         ret = Some(DiffViewAction::SetSearch(search));
+                    }
+
+                    if state.current_view == View::SymbolDiff
+                        && let Some((left_obj, left_diff)) = left_ctx.obj
+                        && let Some((right_obj, right_diff)) = right_ctx.obj
+                        && left_ctx.status.success
+                        && ui
+                            .button("Map >0xFF functions")
+                            .on_hover_text_at_pointer(
+                                "Map right-side functions larger than 0xFF bytes when the best candidate is at least 80% and the second best is under 40%",
+                            )
+                            .clicked()
+                    {
+                        ret = Some(DiffViewAction::SetRelocMappings(
+                            get_large_function_mappings(
+                                left_obj,
+                                left_diff,
+                                right_obj,
+                                right_diff,
+                                diff_config,
+                            ),
+                        ));
                     }
 
                     ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
