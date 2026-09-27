@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
 };
 
 use egui::{Id, Layout, RichText, ScrollArea, Slider, TextEdit, Ui, Widget, text::LayoutJob};
@@ -133,6 +133,39 @@ fn extract_symbol_name(
     }
 }
 
+fn extract_reloc_symbol_name(obj: &Object, symbol_idx: usize) -> Option<String> {
+    let symbol = obj.symbols.get(symbol_idx)?;
+    match symbol.kind {
+        SymbolKind::Function | SymbolKind::Object => Some(symbol.name.clone()),
+        _ => None,
+    }
+}
+
+fn unambiguous_reloc_mappings(mappings: Vec<(String, String)>) -> Vec<(String, String)> {
+    // Remove "ambigous" matches (where the left or right side is used in multiple mappings)
+    let mut left_to_right: HashMap<&String, HashSet<&String>> = HashMap::new();
+    let mut right_to_left: HashMap<&String, HashSet<&String>> = HashMap::new();
+
+    for (left, right) in &mappings {
+        left_to_right.entry(left).or_default().insert(right);
+        right_to_left.entry(right).or_default().insert(left);
+    }
+
+    let ambiguous_left: HashSet<&String> =
+        left_to_right.iter().filter(|(_, rights)| rights.len() > 1).map(|(l, _)| *l).collect();
+
+    let ambiguous_right: HashSet<&String> =
+        right_to_left.iter().filter(|(_, lefts)| lefts.len() > 1).map(|(r, _)| *r).collect();
+
+    mappings
+        .iter()
+        .filter(|(left, right)| {
+            !ambiguous_left.contains(left) && !ambiguous_right.contains(right)
+        })
+        .map(|(left, right)| (left.clone(), right.clone()))
+        .collect()
+}
+
 // Obtains all unambigious relocation pairs inside a function. Used to automatically pair them up using a symbol mapping.
 fn get_reloc_mappings(
     left_obj: &Object,
@@ -158,28 +191,47 @@ fn get_reloc_mappings(
         mappings.push((left_name, right_name));
     }
 
-    // Remove "ambigous" matches (where the left or right side is used in multiple mappings)
-    let mut left_to_right: HashMap<&String, HashSet<&String>> = HashMap::new();
-    let mut right_to_left: HashMap<&String, HashSet<&String>> = HashMap::new();
+    unambiguous_reloc_mappings(mappings)
+}
 
-    for (left, right) in &mappings {
-        left_to_right.entry(left).or_default().insert(right);
-        right_to_left.entry(right).or_default().insert(left);
+fn get_data_reloc_mappings(
+    left_obj: &Object,
+    right_obj: &Object,
+    left_symbol_diff: &SymbolDiff,
+    left_symbol_idx: usize,
+    right_symbol_diff: &SymbolDiff,
+    right_symbol_idx: usize,
+) -> Vec<(String, String)> {
+    let Some(left_symbol) = left_obj.symbols.get(left_symbol_idx) else {
+        return Vec::new();
+    };
+    let Some(right_symbol) = right_obj.symbols.get(right_symbol_idx) else {
+        return Vec::new();
+    };
+
+    let mut left_relocs = BTreeMap::new();
+    for reloc in left_symbol_diff.data_rows.iter().flat_map(|row| &row.relocations) {
+        let offset = reloc.range.start.saturating_sub(left_symbol.address);
+        left_relocs.entry(offset).or_insert(reloc);
     }
 
-    let ambiguous_left: HashSet<&String> =
-        left_to_right.iter().filter(|(_, rights)| rights.len() > 1).map(|(l, _)| *l).collect();
+    let mut right_relocs = BTreeMap::new();
+    for reloc in right_symbol_diff.data_rows.iter().flat_map(|row| &row.relocations) {
+        let offset = reloc.range.start.saturating_sub(right_symbol.address);
+        right_relocs.entry(offset).or_insert(reloc);
+    }
 
-    let ambiguous_right: HashSet<&String> =
-        right_to_left.iter().filter(|(_, lefts)| lefts.len() > 1).map(|(r, _)| *r).collect();
-
-    let unambiguous: Vec<(String, String)> = mappings
-        .iter()
-        .filter(|(l, r)| !ambiguous_left.contains(l) && !ambiguous_right.contains(r))
-        .map(|(l, r)| (l.clone(), r.clone()))
+    let mappings = left_relocs
+        .into_iter()
+        .filter_map(|(offset, left_reloc)| {
+            let right_reloc = right_relocs.get(&offset)?;
+            let left_name = extract_reloc_symbol_name(left_obj, left_reloc.reloc.target_symbol)?;
+            let right_name = extract_reloc_symbol_name(right_obj, right_reloc.reloc.target_symbol)?;
+            Some((left_name, right_name))
+        })
         .collect();
 
-    unambiguous
+    unambiguous_reloc_mappings(mappings)
 }
 
 /// Obtains relocation mappings from all matched functions whose match percentage is at least 80%.
@@ -438,30 +490,43 @@ pub fn diff_view_ui(
                         }
                     }
 
-                    if state.current_view == View::FunctionDiff
+                    if matches!(state.current_view, View::FunctionDiff | View::DataDiff)
                         && let Some((_, left_symbol_diff, left_symbol_idx)) = left_ctx.symbol
                         && let Some((left_obj, _)) = left_ctx.obj
                         && let Some((_, right_symbol_diff, right_symbol_idx)) = right_ctx.symbol
                         && let Some((right_obj, _)) = right_ctx.obj
                         && ui
                             .add_enabled(
-                                diff_config.function_reloc_diffs != FunctionRelocDiffs::None
-                                    && diff_config.function_reloc_diffs
-                                        != FunctionRelocDiffs::DataValue,
+                                state.current_view == View::DataDiff
+                                    || (diff_config.function_reloc_diffs != FunctionRelocDiffs::None
+                                        && diff_config.function_reloc_diffs
+                                            != FunctionRelocDiffs::DataValue),
                                 egui::Button::new("Pair up relocs"),
                             )
                             .on_hover_text_at_pointer("Automatically pair up symbol names")
                             .on_disabled_hover_text("Name relocation diffs have to be enabled")
                             .clicked()
                     {
-                        ret = Some(DiffViewAction::SetRelocMappings(get_reloc_mappings(
-                            left_obj,
-                            right_obj,
-                            left_symbol_diff,
-                            left_symbol_idx,
-                            right_symbol_diff,
-                            right_symbol_idx,
-                        )));
+                        let mappings = if state.current_view == View::FunctionDiff {
+                            get_reloc_mappings(
+                                left_obj,
+                                right_obj,
+                                left_symbol_diff,
+                                left_symbol_idx,
+                                right_symbol_diff,
+                                right_symbol_idx,
+                            )
+                        } else {
+                            get_data_reloc_mappings(
+                                left_obj,
+                                right_obj,
+                                left_symbol_diff,
+                                left_symbol_idx,
+                                right_symbol_diff,
+                                right_symbol_idx,
+                            )
+                        };
+                        ret = Some(DiffViewAction::SetRelocMappings(mappings));
                     }
 
                     if state.current_view == View::FunctionDiff
