@@ -311,8 +311,9 @@ fn reloc_eq(
         return true;
     }
 
-    let symbol_name_addend_matches = symbol_name_matches(left_reloc.symbol, right_reloc.symbol)
-        && left_reloc.relocation.addend == right_reloc.relocation.addend;
+    let symbol_name_addend_matches =
+        symbol_name_matches(left_reloc.symbol, right_reloc.symbol)
+            && left_reloc.relocation.addend == right_reloc.relocation.addend;
     match (left_reloc.symbol.section, right_reloc.symbol.section) {
         (Some(sl), Some(sr)) => {
             if !section_name_eq(left_obj, right_obj, sl, sr) {

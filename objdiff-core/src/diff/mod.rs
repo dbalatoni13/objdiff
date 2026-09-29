@@ -987,11 +987,54 @@ pub(crate) fn section_name_eq(
 }
 
 pub(crate) fn symbol_name_matches(left: &Symbol, right: &Symbol) -> bool {
-    if let Some(left_name) = &left.normalized_name
-        && let Some(right_name) = &right.normalized_name
+    let (left_name, right_name) = if let (Some(left_name), Some(right_name)) =
+        (&left.normalized_name, &right.normalized_name)
     {
-        left_name == right_name
+        (left_name.as_str(), right_name.as_str())
     } else {
-        left.name == right.name
+        (left.name.as_str(), right.name.as_str())
+    };
+
+    strip_delink_suffix(left_name) == strip_delink_suffix(right_name)
+}
+
+fn strip_delink_suffix(name: &str) -> &str {
+    let Some((base, suffix)) = name.rsplit_once("__delink_") else {
+        return name;
+    };
+
+    if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        base
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Symbol, strip_delink_suffix, symbol_name_matches};
+
+    fn symbol(name: &str) -> Symbol { Symbol { name: name.to_string(), ..Default::default() } }
+
+    #[test]
+    fn strip_delink_address_suffix_from_relocation_names() {
+        assert_eq!(strip_delink_suffix("__real@40400000__delink_008959E4"), "__real@40400000");
+        assert_eq!(strip_delink_suffix("symbol__delink_1234abcd"), "symbol");
+        assert_eq!(
+            strip_delink_suffix("symbol__delink_not_an_address"),
+            "symbol__delink_not_an_address"
+        );
+    }
+
+    #[test]
+    fn symbol_names_match_without_delink_address_suffix() {
+        assert!(symbol_name_matches(
+            &symbol("__real@40400000"),
+            &symbol("__real@40400000__delink_008959E4"),
+        ));
+        assert!(!symbol_name_matches(
+            &symbol("__real@40400000"),
+            &symbol("__real@3f800000__delink_008959E4"),
+        ));
     }
 }
