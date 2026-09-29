@@ -95,8 +95,8 @@ fn is_symbol_name_compiler_generated(name: &str) -> bool {
     if name.starts_with('@') && name[1..].chars().all(char::is_numeric) {
         // Match Metrowerks @1234 against @2345
         return true;
-    } else if name.starts_with("_$E") && name[3..].chars().all(char::is_numeric) {
-        // Match MSVC _$E1234 against _$E2345
+    } else if (name.starts_with("_$E") || name.starts_with("$SG")) && name[3..].chars().all(char::is_numeric) {
+        // Match MSVC _$E1234 against _$E2345 and _$SG1234 against _$SG2345
         return true;
     } else if name.starts_with("$LC") && name[3..].chars().all(char::is_numeric) {
         // Match GCC $LC1234 against $LC2345
